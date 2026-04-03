@@ -1,0 +1,23 @@
+{
+  "AppSettings": {
+    "AzureWebJobsStorage__accountName": "$($variableGroup.StorageAccount_name.value)",
+    "FUNCTIONS_WORKER_RUNTIME": "dotnet",
+    "FUNCTIONS_EXTENSION_VERSION": "~4",
+    "AZURE_FUNCTIONS_ENVIRONMENT": "$environmentName",
+    "TaskHub": "MasterFlow",
+
+    "APPINSIGHTS_INSTRUMENTATIONKEY": "$($variableGroup.AppInsights_instrumentationKey.value)",
+    "ConnectionStrings:DefaultConnection": "$($variableGroup.SQL_databaseConnectionString_MI.value)",
+    "AppConfig:ManagedIdentityClientId": "$($variableGroup.ManagedIdentity_clientId.value)",
+    "AppConfig:Endpoint": "$($variableGroup.AppConfigService_url.value)",
+
+    "FunctionBinding:DeploymentServiceBusConnection": "$serviceBusConnStrSecret",
+    "FunctionBinding:CreateApplicationLandscapeTopic": "idlrequest",
+    "FunctionBinding:WorkflowSubscriptionName": "azure",
+    "FunctionBinding:UpdateStatusTopic": "updatestatus",
+
+    "App:Global:ServiceBus:ConnectionString": "$($variableGroup.ServiceBus_managedIdentityConnectionString.value)",
+    "App:Infrastructure.Services:ServiceBus:ConnectionString": "$($variableGroup.ServiceBus_managedIdentityConnectionString.value)",
+    "AZURE_CLIENT_ID": "$($variableGroup.ManagedIdentity_clientId.value)"
+  }
+}
