@@ -1,0 +1,12 @@
+.git
+.gitignore
+.vscode
+node_modules
+dist
+app.zip
+*.md
+*.ps1
+Examples
+scripts
+.env
+.env.*
