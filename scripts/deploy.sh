@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# deploy.sh — Build the container image in ACR and roll the Container App.
+# deploy.sh — Build app.zip and deploy to Azure App Service via Blob + WEBSITE_RUN_FROM_PACKAGE.
 #
 # Infra must already exist (Terraform: terraform/projects/smbc-jria-healthcheck).
-# Requires: az cli + logged in.
+# Requires: az cli + logged in, npm, zip.
 #
 # Usage:
-#   ./scripts/deploy.sh           # tag = git short-sha (or "manual" if not a repo)
-#   TAG=v1 ./scripts/deploy.sh    # explicit tag
+#   ./scripts/deploy.sh
+#   SKIP_BUILD=1 ./scripts/deploy.sh    # upload existing app.zip without rebuilding
 #
 set -euo pipefail
 
@@ -14,52 +14,51 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR/.."
 
 # Keep in sync with terraform/projects/smbc-jria-healthcheck/locals.tf
+STORAGE_ACCOUNT="cubicle13backup"
+CONTAINER="jria-healthcheck-stub"
+BLOB_NAME="app.zip"
+APP_NAME="app-smbc-jria-healthcheck-poc"
 RG="rg-smbc-jria-healthcheck-poc"
-ACR="acrsmbcjriahcpoc"
-APP="ca-smbc-jria-healthcheck-poc"
-REPO="jria-healthcheck-stub"
-
-TAG="${TAG:-$(git rev-parse --short HEAD 2>/dev/null || echo manual)}"
-IMAGE="${ACR}.azurecr.io/${REPO}:${TAG}"
 
 echo "[deploy] Verifying az login..."
 az account show --query '{name:name, id:id}' -o tsv
 
-echo "[deploy] Building image in ACR (server-side)..."
-echo "         image: ${IMAGE}"
-az acr build \
-  --registry "${ACR}" \
-  --image "${REPO}:${TAG}" \
-  --image "${REPO}:latest" \
-  --file Dockerfile \
-  --only-show-errors \
-  .
+if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
+  echo "[deploy] Building app.zip (npm run package)..."
+  npm run package
+fi
 
-echo "[deploy] Updating Container App ${APP} to image ${IMAGE}..."
-az containerapp update \
-  --name "${APP}" \
-  --resource-group "${RG}" \
-  --image "${IMAGE}" \
-  --only-show-errors \
-  --query "properties.latestRevisionFqdn" -o tsv
+[[ -f app.zip ]] || { echo "[deploy] ERROR: app.zip not found"; exit 1; }
+echo "[deploy] app.zip size: $(du -h app.zip | cut -f1)"
 
-FQDN=$(az containerapp show --name "${APP}" --resource-group "${RG}" --query "properties.configuration.ingress.fqdn" -o tsv)
-HEALTH_URL="https://${FQDN}/health"
+echo "[deploy] Uploading to ${STORAGE_ACCOUNT}/${CONTAINER}/${BLOB_NAME}..."
+az storage blob upload \
+  --auth-mode login \
+  --account-name "${STORAGE_ACCOUNT}" \
+  --container-name "${CONTAINER}" \
+  --name "${BLOB_NAME}" \
+  --file app.zip \
+  --overwrite \
+  --only-show-errors
 
-echo "[deploy] Waiting 20s for revision to come up..."
-sleep 20
+echo "[deploy] Restarting App Service ${APP_NAME}..."
+az webapp restart --name "${APP_NAME}" --resource-group "${RG}" --only-show-errors
+
+HEALTH_URL="https://${APP_NAME}.azurewebsites.net/health"
+echo "[deploy] Waiting 30s for cold start (App Service unzips + npm warmup)..."
+sleep 30
 
 echo "[deploy] Probing ${HEALTH_URL}..."
-for i in 1 2 3 4 5 6; do
-  if curl -fsS --max-time 10 "${HEALTH_URL}" ; then
+for i in 1 2 3 4 5 6 7 8; do
+  if curl -fsS --max-time 15 "${HEALTH_URL}" ; then
     echo
-    echo "[deploy] SUCCESS — ${HEALTH_URL}"
+    echo "[deploy] SUCCESS"
     exit 0
   fi
-  echo "  attempt ${i}/6 failed, retrying in 10s..."
-  sleep 10
+  echo "  attempt ${i}/8 failed, retrying in 12s..."
+  sleep 12
 done
 
 echo "[deploy] WARN: healthcheck did not respond OK. Tail logs with:"
-echo "  az containerapp logs show --name ${APP} --resource-group ${RG} --follow"
+echo "  az webapp log tail --name ${APP_NAME} --resource-group ${RG}"
 exit 1
