@@ -1,0 +1,22 @@
+{
+  "name": "jria-healthcheck-stub",
+  "version": "1.0.0",
+  "description": "Node.js health-check stub: responds on /health /healthz /readiness. Deployed to Azure App Service via WEBSITE_RUN_FROM_PACKAGE ahead of real app code.",
+  "main": "server.js",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "clean": "rm -rf dist app.zip",
+    "copy": "mkdir dist && cp -r server.js package.json package-lock.json dist/",
+    "build": "npm install --omit=dev && npm prune --omit=dev",
+    "package": "npm run clean && npm run build && npm run copy && cd dist && zip -r ../app.zip .",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jugheadny/HealthCheckApp.git"
+  },
+  "author": "rcarroll",
+  "license": "ISC",
+  "engines": { "node": ">=20" }
+}
