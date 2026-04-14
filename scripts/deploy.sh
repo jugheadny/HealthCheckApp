@@ -45,17 +45,17 @@ echo "[deploy] Restarting App Service ${APP_NAME}..."
 az webapp restart --name "${APP_NAME}" --resource-group "${RG}" --only-show-errors
 
 HEALTH_URL="https://${APP_NAME}.azurewebsites.net/health"
-echo "[deploy] Waiting 30s for cold start (App Service unzips + npm warmup)..."
-sleep 30
+echo "[deploy] Waiting 30s for cold start (Linux App Service WEBSITE_RUN_FROM_PACKAGE unzip + Node bootstrap, ~90s)..."
+sleep 90
 
 echo "[deploy] Probing ${HEALTH_URL}..."
-for i in 1 2 3 4 5 6 7 8; do
+for i in $(seq 1 12); do
   if curl -fsS --max-time 15 "${HEALTH_URL}" ; then
     echo
     echo "[deploy] SUCCESS"
     exit 0
   fi
-  echo "  attempt ${i}/8 failed, retrying in 12s..."
+  echo "  attempt ${i}/12 failed, retrying in 12s..."
   sleep 12
 done
 
