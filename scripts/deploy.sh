@@ -45,7 +45,7 @@ echo "[deploy] Restarting App Service ${APP_NAME}..."
 az webapp restart --name "${APP_NAME}" --resource-group "${RG}" --only-show-errors
 
 HEALTH_URL="https://${APP_NAME}.azurewebsites.net/health"
-echo "[deploy] Waiting 30s for cold start (Linux App Service WEBSITE_RUN_FROM_PACKAGE unzip + Node bootstrap, ~90s)..."
+echo "[deploy] Waiting 90s for cold start (Linux App Service WEBSITE_RUN_FROM_PACKAGE unzip + Node bootstrap, ~90s)..."
 sleep 90
 
 echo "[deploy] Probing ${HEALTH_URL}..."
