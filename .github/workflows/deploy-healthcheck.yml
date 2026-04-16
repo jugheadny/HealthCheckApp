@@ -1,0 +1,235 @@
+name: Deploy HealthCheckApp to Node.js App Services
+
+# Enumerates all Node.js App Services across one or more Azure subscriptions,
+# builds app.zip from source, and deploys to each target.
+#
+# Required secrets (set in repo Settings → Secrets → Actions):
+#   AZURE_CLIENT_ID       — Service principal / managed identity client ID (OIDC)
+#   AZURE_TENANT_ID       — Azure AD tenant ID (OIDC)
+#   AZURE_SUBSCRIPTION_IDS — Comma-separated list of subscription IDs to scan
+#                            e.g. "xxxxxxxx-...,yyyyyyyy-..."
+#
+# Optional secrets (if using client-secret auth instead of OIDC):
+#   AZURE_CLIENT_SECRET   — SP client secret (only needed when OIDC is not configured)
+#
+# OIDC setup (preferred — no long-lived secret):
+#   1. Register an App Registration (or use an existing SP) in Azure AD
+#   2. Add a federated credential:
+#        Issuer:  https://token.actions.githubusercontent.com
+#        Subject: repo:jugheadny/HealthCheckApp:ref:refs/heads/main
+#                 (also add claude/work if you want to deploy from that branch)
+#        Audience: api://AzureADTokenExchange
+#   3. Grant the SP "Contributor" (or a custom role with
+#      Microsoft.Web/sites/write + Microsoft.Web/sites/read) on each subscription
+#      or resource group you want to deploy to.
+#   4. Set AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_IDS in repo secrets.
+#   See: https://learn.microsoft.com/en-us/azure/developer/github/connect-from-azure
+
+on:
+  workflow_dispatch:
+    inputs:
+      subscription_ids:
+        description: >
+          Comma-separated Azure subscription IDs to scan. Leave blank to use
+          the AZURE_SUBSCRIPTION_IDS secret.
+        required: false
+        default: ""
+      dry_run:
+        description: "Dry run — enumerate targets but skip deployment"
+        type: boolean
+        required: false
+        default: false
+      node_stack_filter:
+        description: >
+          Stack prefix filter for Linux App Services (e.g. NODE|20, NODE).
+          Leave blank to match all Node versions.
+        required: false
+        default: "NODE"
+      health_check_path:
+        description: "Health endpoint to probe after each deploy (relative path)"
+        required: false
+        default: "/health"
+
+permissions:
+  id-token: write   # required for OIDC token exchange
+  contents: read
+
+env:
+  NODE_VERSION: "20"
+
+jobs:
+  # ──────────────────────────────────────────────────────────────────────────
+  # Job 1: Build app.zip once; upload as artifact for deploy jobs to consume.
+  # ──────────────────────────────────────────────────────────────────────────
+  build:
+    name: Build app.zip
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: Install production dependencies
+        run: npm ci --omit=dev
+
+      - name: Package app.zip
+        run: npm run package
+
+      - name: Upload app.zip artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-zip
+          path: app.zip
+          retention-days: 1
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Job 2: Enumerate all Node.js App Services across subscriptions.
+  #        Outputs a JSON matrix consumed by the deploy job.
+  # ──────────────────────────────────────────────────────────────────────────
+  enumerate:
+    name: Enumerate Node.js App Services
+    runs-on: ubuntu-latest
+    needs: build
+
+    outputs:
+      targets: ${{ steps.enumerate.outputs.targets }}
+      count: ${{ steps.enumerate.outputs.count }}
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          # subscription-id is intentionally omitted — we iterate subscriptions
+          # in the enumerate script; login at tenant scope.
+          allow-no-subscriptions: true
+
+      - name: Enumerate Node.js App Services
+        id: enumerate
+        env:
+          SUBSCRIPTION_IDS_INPUT: ${{ inputs.subscription_ids }}
+          SUBSCRIPTION_IDS_SECRET: ${{ secrets.AZURE_SUBSCRIPTION_IDS }}
+          NODE_STACK_FILTER: ${{ inputs.node_stack_filter }}
+        run: bash scripts/enumerate-app-services.sh
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Job 3: Deploy in parallel to each discovered App Service.
+  #        Skipped entirely when dry_run=true.
+  # ──────────────────────────────────────────────────────────────────────────
+  deploy:
+    name: "Deploy → ${{ matrix.target.app_name }} (${{ matrix.target.subscription_id }})"
+    runs-on: ubuntu-latest
+    needs: [build, enumerate]
+    if: ${{ inputs.dry_run != true && fromJson(needs.enumerate.outputs.count) > 0 }}
+
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        target: ${{ fromJson(needs.enumerate.outputs.targets) }}
+
+    steps:
+      - name: Download app.zip artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: app-zip
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ matrix.target.subscription_id }}
+
+      - name: Deploy app.zip to ${{ matrix.target.app_name }}
+        id: deploy
+        env:
+          APP_NAME: ${{ matrix.target.app_name }}
+          RESOURCE_GROUP: ${{ matrix.target.resource_group }}
+          SUBSCRIPTION_ID: ${{ matrix.target.subscription_id }}
+        run: |
+          echo "::group::Deploying to ${APP_NAME} (rg: ${RESOURCE_GROUP}, sub: ${SUBSCRIPTION_ID})"
+          az account set --subscription "${SUBSCRIPTION_ID}"
+          az webapp deploy \
+            --name "${APP_NAME}" \
+            --resource-group "${RESOURCE_GROUP}" \
+            --src-path app.zip \
+            --type zip \
+            --async false \
+            --only-show-errors
+          echo "::endgroup::"
+          echo "deployed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Health check ${{ matrix.target.app_name }}
+        if: steps.deploy.outputs.deployed == 'true'
+        env:
+          APP_NAME: ${{ matrix.target.app_name }}
+          HEALTH_PATH: ${{ inputs.health_check_path }}
+        run: |
+          HEALTH_URL="https://${APP_NAME}.azurewebsites.net${HEALTH_PATH}"
+          echo "Probing ${HEALTH_URL} (up to 3 min)..."
+          for i in $(seq 1 18); do
+            STATUS=$(curl -o /dev/null -fsS --max-time 15 -w "%{http_code}" "${HEALTH_URL}" 2>/dev/null || echo "000")
+            if [[ "${STATUS}" == "200" ]]; then
+              echo "Health check passed (HTTP 200) after attempt ${i}"
+              exit 0
+            fi
+            echo "  attempt ${i}/18 — HTTP ${STATUS}, retrying in 10s..."
+            sleep 10
+          done
+          echo "::warning::Health check did not pass for ${APP_NAME} within 3 minutes. Status last seen: ${STATUS}"
+          exit 1
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Job 4: Summary — always runs; prints a table of targets and results.
+  # ──────────────────────────────────────────────────────────────────────────
+  summary:
+    name: Deployment Summary
+    runs-on: ubuntu-latest
+    needs: [enumerate, deploy]
+    if: always()
+
+    steps:
+      - name: Write job summary
+        env:
+          TARGETS_JSON: ${{ needs.enumerate.outputs.targets }}
+          TARGET_COUNT: ${{ needs.enumerate.outputs.count }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+        run: |
+          cat >> "${GITHUB_STEP_SUMMARY}" <<EOF
+          ## HealthCheckApp Deployment Summary
+
+          | Field | Value |
+          |---|---|
+          | Mode | $([ "${DRY_RUN}" = "true" ] && echo "Dry run (enumerate only)" || echo "Live deploy") |
+          | Targets found | ${TARGET_COUNT} |
+          | Deploy job result | ${DEPLOY_RESULT:-skipped} |
+          | Node stack filter | ${{ inputs.node_stack_filter }} |
+
+          ### Targets Enumerated
+
+          EOF
+
+          if [[ -z "${TARGETS_JSON}" || "${TARGETS_JSON}" == "[]" ]]; then
+            echo "No Node.js App Services found matching the filter." >> "${GITHUB_STEP_SUMMARY}"
+          else
+            echo "| App Name | Resource Group | Subscription | OS | Stack |" >> "${GITHUB_STEP_SUMMARY}"
+            echo "|---|---|---|---|---|" >> "${GITHUB_STEP_SUMMARY}"
+            echo "${TARGETS_JSON}" | python3 -c "
+          import sys, json
+          targets = json.load(sys.stdin)
+          for t in targets:
+              print('| {app_name} | {resource_group} | {subscription_id} | {os_type} | {node_stack} |'.format(**t))
+          " >> "${GITHUB_STEP_SUMMARY}"
+          fi
