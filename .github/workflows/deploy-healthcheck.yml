@@ -120,7 +120,7 @@ jobs:
           SUBSCRIPTION_IDS_INPUT: ${{ inputs.subscription_ids }}
           SUBSCRIPTION_IDS_SECRET: ${{ secrets.AZURE_SUBSCRIPTION_IDS }}
           NODE_STACK_FILTER: ${{ inputs.node_stack_filter }}
-        run: bash scripts/enumerate-app-services.sh
+        run: pwsh scripts/Enumerate-AppServices.ps1
 
   # ──────────────────────────────────────────────────────────────────────────
   # Job 3: Deploy in parallel to each discovered App Service.
@@ -206,30 +206,36 @@ jobs:
           TARGET_COUNT: ${{ needs.enumerate.outputs.count }}
           DRY_RUN: ${{ inputs.dry_run }}
           DEPLOY_RESULT: ${{ needs.deploy.result }}
+        shell: pwsh
         run: |
-          cat >> "${GITHUB_STEP_SUMMARY}" <<EOF
+          $mode        = if ($env:DRY_RUN -eq 'true') { 'Dry run (enumerate only)' } else { 'Live deploy' }
+          $deployResult = if ($env:DEPLOY_RESULT) { $env:DEPLOY_RESULT } else { 'skipped' }
+          $filter      = '${{ inputs.node_stack_filter }}'
+
+          $summary = @"
           ## HealthCheckApp Deployment Summary
 
           | Field | Value |
           |---|---|
-          | Mode | $([ "${DRY_RUN}" = "true" ] && echo "Dry run (enumerate only)" || echo "Live deploy") |
-          | Targets found | ${TARGET_COUNT} |
-          | Deploy job result | ${DEPLOY_RESULT:-skipped} |
-          | Node stack filter | ${{ inputs.node_stack_filter }} |
+          | Mode | $mode |
+          | Targets found | $($env:TARGET_COUNT) |
+          | Deploy job result | $deployResult |
+          | Node stack filter | $filter |
 
           ### Targets Enumerated
 
-          EOF
+          "@
 
-          if [[ -z "${TARGETS_JSON}" || "${TARGETS_JSON}" == "[]" ]]; then
-            echo "No Node.js App Services found matching the filter." >> "${GITHUB_STEP_SUMMARY}"
-          else
-            echo "| App Name | Resource Group | Subscription | OS | Stack |" >> "${GITHUB_STEP_SUMMARY}"
-            echo "|---|---|---|---|---|" >> "${GITHUB_STEP_SUMMARY}"
-            echo "${TARGETS_JSON}" | python3 -c "
-          import sys, json
-          targets = json.load(sys.stdin)
-          for t in targets:
-              print('| {app_name} | {resource_group} | {subscription_id} | {os_type} | {node_stack} |'.format(**t))
-          " >> "${GITHUB_STEP_SUMMARY}"
-          fi
+          if ([string]::IsNullOrEmpty($env:TARGETS_JSON) -or $env:TARGETS_JSON -eq '[]') {
+            $summary += "`nNo Node.js App Services found matching the filter.`n"
+          }
+          else {
+            $targets = $env:TARGETS_JSON | ConvertFrom-Json
+            $summary += "| App Name | Resource Group | Subscription | OS | Stack |`n"
+            $summary += "|---|---|---|---|---|`n"
+            foreach ($t in $targets) {
+              $summary += "| $($t.app_name) | $($t.resource_group) | $($t.subscription_id) | $($t.os_type) | $($t.node_stack) |`n"
+            }
+          }
+
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
