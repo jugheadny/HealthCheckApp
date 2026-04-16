@@ -6,9 +6,9 @@
 
 .DESCRIPTION
     Environment variables (all optional — defaults shown):
-      SUBSCRIPTION_IDS_INPUT   Comma-separated sub IDs from workflow_dispatch input
-      SUBSCRIPTION_IDS_SECRET  Comma-separated sub IDs from Actions secret (fallback)
-      NODE_STACK_FILTER        Stack prefix to match (default: "NODE")
+      SUBSCRIPTION_IDS_INPUT  Comma-separated sub IDs from workflow_dispatch input
+                              Leave blank to scan all subscriptions the SP can access
+      NODE_STACK_FILTER       Stack prefix to match (default: "NODE")
                                Empty string -> match all App Services (any stack)
 
     Output (written to $env:GITHUB_OUTPUT when set; printed to stdout otherwise):
@@ -35,9 +35,6 @@ function Write-Warn {
 # ── Resolve subscription list ────────────────────────────────────────────────
 
 $rawIds = $env:SUBSCRIPTION_IDS_INPUT
-if ([string]::IsNullOrWhiteSpace($rawIds)) {
-    $rawIds = $env:SUBSCRIPTION_IDS_SECRET
-}
 
 if ([string]::IsNullOrWhiteSpace($rawIds)) {
     Write-Log "No subscription IDs provided via input or secret. Falling back to az account list."

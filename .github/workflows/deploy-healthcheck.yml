@@ -7,10 +7,8 @@ name: Deploy HealthCheckApp to Node.js App Services
 # No build step — the package is committed to the repo.
 #
 # Required secrets (set in repo Settings → Secrets → Actions):
-#   AZURE_CLIENT_ID        — Service principal / managed identity client ID (OIDC)
-#   AZURE_TENANT_ID        — Azure AD tenant ID (OIDC)
-#   AZURE_SUBSCRIPTION_IDS — Comma-separated list of subscription IDs to scan
-#                            e.g. "xxxxxxxx-...,yyyyyyyy-..."
+#   AZURE_CLIENT_ID  — Service principal / managed identity client ID (OIDC)
+#   AZURE_TENANT_ID  — Azure AD tenant ID (OIDC)
 #
 # OIDC setup (preferred — no long-lived secret):
 #   1. Register an App Registration (or use an existing SP) in Azure AD
@@ -27,8 +25,8 @@ on:
     inputs:
       subscription_ids:
         description: >
-          Comma-separated Azure subscription IDs to scan. Leave blank to use
-          the AZURE_SUBSCRIPTION_IDS secret.
+          Comma-separated Azure subscription IDs to scan.
+          Leave blank to scan all subscriptions the service principal can access.
         required: false
         default: ""
       dry_run:
@@ -80,7 +78,6 @@ jobs:
         id: enumerate
         env:
           SUBSCRIPTION_IDS_INPUT: ${{ inputs.subscription_ids }}
-          SUBSCRIPTION_IDS_SECRET: ${{ secrets.AZURE_SUBSCRIPTION_IDS }}
           NODE_STACK_FILTER: ${{ inputs.node_stack_filter }}
         run: pwsh scripts/Enumerate-AppServices.ps1
 
