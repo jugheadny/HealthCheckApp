@@ -1,27 +1,24 @@
 name: Deploy HealthCheckApp to Node.js App Services
 
-# Enumerates all Node.js App Services across one or more Azure subscriptions,
-# builds app.zip from source, and deploys to each target.
+# Enumerates all Node.js App Services across one or more Azure subscriptions
+# and deploys the pre-built packages/app.zip from the repository to each target.
+#
+# app.zip is expected at packages/app.zip in the repo root.
+# No build step — the package is committed to the repo.
 #
 # Required secrets (set in repo Settings → Secrets → Actions):
-#   AZURE_CLIENT_ID       — Service principal / managed identity client ID (OIDC)
-#   AZURE_TENANT_ID       — Azure AD tenant ID (OIDC)
+#   AZURE_CLIENT_ID        — Service principal / managed identity client ID (OIDC)
+#   AZURE_TENANT_ID        — Azure AD tenant ID (OIDC)
 #   AZURE_SUBSCRIPTION_IDS — Comma-separated list of subscription IDs to scan
 #                            e.g. "xxxxxxxx-...,yyyyyyyy-..."
-#
-# Optional secrets (if using client-secret auth instead of OIDC):
-#   AZURE_CLIENT_SECRET   — SP client secret (only needed when OIDC is not configured)
 #
 # OIDC setup (preferred — no long-lived secret):
 #   1. Register an App Registration (or use an existing SP) in Azure AD
 #   2. Add a federated credential:
 #        Issuer:  https://token.actions.githubusercontent.com
 #        Subject: repo:jugheadny/HealthCheckApp:ref:refs/heads/main
-#                 (also add claude/work if you want to deploy from that branch)
 #        Audience: api://AzureADTokenExchange
-#   3. Grant the SP "Contributor" (or a custom role with
-#      Microsoft.Web/sites/write + Microsoft.Web/sites/read) on each subscription
-#      or resource group you want to deploy to.
+#   3. Grant the SP "Contributor" on each subscription or resource group to deploy to.
 #   4. Set AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_IDS in repo secrets.
 #   See: https://learn.microsoft.com/en-us/azure/developer/github/connect-from-azure
 
@@ -54,48 +51,14 @@ permissions:
   id-token: write   # required for OIDC token exchange
   contents: read
 
-env:
-  NODE_VERSION: "20"
-
 jobs:
   # ──────────────────────────────────────────────────────────────────────────
-  # Job 1: Build app.zip once; upload as artifact for deploy jobs to consume.
-  # ──────────────────────────────────────────────────────────────────────────
-  build:
-    name: Build app.zip
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout source
-        uses: actions/checkout@v4
-
-      - name: Set up Node.js ${{ env.NODE_VERSION }}
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: "npm"
-
-      - name: Install production dependencies
-        run: npm ci --omit=dev
-
-      - name: Package app.zip
-        run: npm run package
-
-      - name: Upload app.zip artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-zip
-          path: app.zip
-          retention-days: 1
-
-  # ──────────────────────────────────────────────────────────────────────────
-  # Job 2: Enumerate all Node.js App Services across subscriptions.
+  # Job 1: Enumerate all Node.js App Services across subscriptions.
   #        Outputs a JSON matrix consumed by the deploy job.
   # ──────────────────────────────────────────────────────────────────────────
   enumerate:
     name: Enumerate Node.js App Services
     runs-on: ubuntu-latest
-    needs: build
 
     outputs:
       targets: ${{ steps.enumerate.outputs.targets }}
@@ -110,8 +73,7 @@ jobs:
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          # subscription-id is intentionally omitted — we iterate subscriptions
-          # in the enumerate script; login at tenant scope.
+          # subscription-id intentionally omitted — we iterate all subscriptions
           allow-no-subscriptions: true
 
       - name: Enumerate Node.js App Services
@@ -123,13 +85,13 @@ jobs:
         run: pwsh scripts/Enumerate-AppServices.ps1
 
   # ──────────────────────────────────────────────────────────────────────────
-  # Job 3: Deploy in parallel to each discovered App Service.
+  # Job 2: Deploy in parallel to each discovered App Service.
   #        Skipped entirely when dry_run=true.
   # ──────────────────────────────────────────────────────────────────────────
   deploy:
     name: "Deploy → ${{ matrix.target.app_name }} (${{ matrix.target.subscription_id }})"
     runs-on: ubuntu-latest
-    needs: [build, enumerate]
+    needs: enumerate
     if: ${{ inputs.dry_run != true && fromJson(needs.enumerate.outputs.count) > 0 }}
 
     strategy:
@@ -139,10 +101,16 @@ jobs:
         target: ${{ fromJson(needs.enumerate.outputs.targets) }}
 
     steps:
-      - name: Download app.zip artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: app-zip
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Verify packages/app.zip exists
+        run: |
+          if [[ ! -f "packages/app.zip" ]]; then
+            echo "::error::packages/app.zip not found in repository. Commit the package before running this workflow."
+            exit 1
+          fi
+          echo "packages/app.zip found ($(du -sh packages/app.zip | cut -f1))"
 
       - name: Azure login (OIDC)
         uses: azure/login@v2
@@ -151,7 +119,7 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ matrix.target.subscription_id }}
 
-      - name: Deploy app.zip to ${{ matrix.target.app_name }}
+      - name: Deploy packages/app.zip to ${{ matrix.target.app_name }}
         id: deploy
         env:
           APP_NAME: ${{ matrix.target.app_name }}
@@ -163,7 +131,7 @@ jobs:
           az webapp deploy \
             --name "${APP_NAME}" \
             --resource-group "${RESOURCE_GROUP}" \
-            --src-path app.zip \
+            --src-path packages/app.zip \
             --type zip \
             --async false \
             --only-show-errors
@@ -191,7 +159,7 @@ jobs:
           exit 1
 
   # ──────────────────────────────────────────────────────────────────────────
-  # Job 4: Summary — always runs; prints a table of targets and results.
+  # Job 3: Summary — always runs; prints a table of targets and results.
   # ──────────────────────────────────────────────────────────────────────────
   summary:
     name: Deployment Summary
@@ -208,9 +176,9 @@ jobs:
           DEPLOY_RESULT: ${{ needs.deploy.result }}
         shell: pwsh
         run: |
-          $mode        = if ($env:DRY_RUN -eq 'true') { 'Dry run (enumerate only)' } else { 'Live deploy' }
+          $mode         = if ($env:DRY_RUN -eq 'true') { 'Dry run (enumerate only)' } else { 'Live deploy' }
           $deployResult = if ($env:DEPLOY_RESULT) { $env:DEPLOY_RESULT } else { 'skipped' }
-          $filter      = '${{ inputs.node_stack_filter }}'
+          $filter       = '${{ inputs.node_stack_filter }}'
 
           $summary = @"
           ## HealthCheckApp Deployment Summary
@@ -221,6 +189,7 @@ jobs:
           | Targets found | $($env:TARGET_COUNT) |
           | Deploy job result | $deployResult |
           | Node stack filter | $filter |
+          | Package | packages/app.zip |
 
           ### Targets Enumerated
 
