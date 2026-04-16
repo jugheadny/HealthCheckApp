@@ -10,9 +10,13 @@
                               Leave blank to scan all subscriptions the SP can access
       NODE_STACK_FILTER       Stack prefix to match (default: "NODE")
                                Empty string -> match all App Services (any stack)
+      HEALTH_CHECK_PATH       If set, only include App Services whose Azure-configured
+                               health check path matches this value (exact match).
+                               Leave blank to include all App Services regardless
+                               of health check path.
 
     Output (written to $env:GITHUB_OUTPUT when set; printed to stdout otherwise):
-      targets  JSON array: [{app_name, resource_group, subscription_id, os_type, node_stack}]
+      targets  JSON array: [{app_name, resource_group, subscription_id, os_type, node_stack, health_check_path}]
       count    Integer count of discovered targets
 
     Requires:
@@ -52,7 +56,12 @@ $subscriptions = $rawIds -split ',' |
 
 Write-Log "Scanning $($subscriptions.Count) subscription(s): $($subscriptions -join ', ')"
 
-$stackFilter = if ($null -ne $env:NODE_STACK_FILTER) { $env:NODE_STACK_FILTER } else { 'NODE' }
+$stackFilter       = if ($null -ne $env:NODE_STACK_FILTER) { $env:NODE_STACK_FILTER } else { 'NODE' }
+$healthCheckFilter = if ($null -ne $env:HEALTH_CHECK_PATH) { $env:HEALTH_CHECK_PATH.Trim() } else { '' }
+
+if (-not [string]::IsNullOrEmpty($healthCheckFilter)) {
+    Write-Log "Health check path filter: '$healthCheckFilter'"
+}
 
 # ── Enumerate across subscriptions ──────────────────────────────────────────
 
@@ -95,7 +104,7 @@ foreach ($sub in $subscriptions) {
             continue
         }
 
-        # Fetch site config for stack info
+        # Fetch site config for stack info and health check path
         try {
             $siteConfigJson = az webapp config show `
                 --name $appName `
@@ -111,8 +120,9 @@ foreach ($sub in $subscriptions) {
             continue
         }
 
-        $linuxFx  = if ($siteConfig.linuxFxVersion) { $siteConfig.linuxFxVersion } else { '' }
-        $winNode  = if ($siteConfig.nodeVersion)     { $siteConfig.nodeVersion }     else { '' }
+        $linuxFx         = if ($siteConfig.linuxFxVersion) { $siteConfig.linuxFxVersion } else { '' }
+        $winNode         = if ($siteConfig.nodeVersion)     { $siteConfig.nodeVersion }     else { '' }
+        $healthCheckPath = if ($siteConfig.healthCheckPath) { $siteConfig.healthCheckPath } else { '' }
 
         # Determine OS type and stack string
         if ($kind -match 'linux') {
@@ -132,14 +142,23 @@ foreach ($sub in $subscriptions) {
             }
         }
 
-        Write-Log "    MATCH: $appName | rg=$resourceGroup | os=$osType | stack=$nodeStack"
+        # Apply health check path filter
+        if (-not [string]::IsNullOrEmpty($healthCheckFilter)) {
+            if ($healthCheckPath -ne $healthCheckFilter) {
+                Write-Log "    Skipping $appName (health_check_path='$healthCheckPath', filter='$healthCheckFilter')"
+                continue
+            }
+        }
+
+        Write-Log "    MATCH: $appName | rg=$resourceGroup | os=$osType | stack=$nodeStack | health_check_path=$healthCheckPath"
 
         $targets.Add(@{
-            app_name        = $appName
-            resource_group  = $resourceGroup
-            subscription_id = $sub
-            os_type         = $osType
-            node_stack      = $nodeStack
+            app_name          = $appName
+            resource_group    = $resourceGroup
+            subscription_id   = $sub
+            os_type           = $osType
+            node_stack        = $nodeStack
+            health_check_path = $healthCheckPath
         })
     }
 }
